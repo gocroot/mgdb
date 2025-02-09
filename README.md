@@ -213,7 +213,7 @@ This package is open-source and available for use under the MIT License.
 ```sh
 go get -u all
 go mod tidy
-git tag v0.1.0
+git tag v0.1.1
 git push origin --tags
-go list -m github.com/gocroot/mgdb@v0.1.0
+go list -m github.com/gocroot/mgdb@v0.1.1
 ```
