@@ -26,6 +26,24 @@ if err != nil {
     log.Fatal(err)
 }
 ```
+If u want to call inside a config folder
+```go
+package config
+
+import (
+	"os"
+
+	"github.com/gocroot/mgdb"
+)
+
+var mconn = mgdb.DBInfo{
+	DBString: os.Getenv("MONGOSTRING"),
+	DBName:   "mydatabase",
+}
+
+var Mongoconn, ErrorMongoconn = mgdb.MongoConnect(mconn)
+
+```
 
 ## CRUD Operations
 
