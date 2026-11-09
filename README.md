@@ -227,11 +227,20 @@ isHoliday := mgdb.HariLibur(time.Now())
 ## License
 This package is open-source and available for use under the MIT License.
 
+## Keamanan & Performa
+
+- **Timeout:** setiap operasi database dibatasi `mgdb.OperationTimeout` (default 30 detik), termasuk koneksi awal. Ubah sebelum dipakai jika perlu, misalnya `mgdb.OperationTimeout = 10 * time.Second`.
+- **Tidak panic:** `MongoConnect` mengembalikan error untuk URI kosong atau rusak. Untuk fallback SRV, gunakan `mgdb.LookupSRV(uri)` yang mengembalikan error. `SRVLookup` lama tetap ada (deprecated) dan mengembalikan string kosong jika gagal.
+- **Upsert:** `UpdateOneDoc` membuat dokumen baru jika filter tidak cocok.
+- **NoSQL injection:** jangan memasukkan `map`/`bson.M` hasil decode JSON dari request langsung ke filter, karena input seperti `{"$ne": null}` bisa mengubah arti query. Decode ke struct dengan field bertipe jelas (misalnya `string`), lalu susun filter sendiri. `EditDocInArray` menolak nama field yang diawali `$`.
+- **Hari libur:** `HariLibur` tidak memanggil API untuk Sabtu/Minggu, dan menyimpan daftar libur per bulan di cache selama 12 jam. Endpoint bisa diganti lewat `mgdb.HolidayAPIURL`, client HTTP lewat `mgdb.HTTPClient` (timeout 15 detik).
+
 ## Release Version
+
+Rilis dibuat **otomatis** oleh workflow *Auto Tag & Release* setiap ada push ke `main` yang mengubah kode Go, `go.mod`, atau `go.sum`. Jangan membuat tag manual. Kenaikan versi mengikuti pesan commit: `fix:` → patch, `feat:` → minor, dan `[skip release]` untuk melewati rilis. Rilis manual bisa lewat tab Actions → *Run workflow*.
+
 ```sh
-go get -u all
+go get -u ./...
 go mod tidy
-git tag v0.1.2
-git push origin --tags
-go list -m github.com/gocroot/mgdb@v0.1.2
+go list -m -versions github.com/gocroot/mgdb
 ```

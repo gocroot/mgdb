@@ -3,104 +3,143 @@ package mgdb
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
+// jakarta dimuat sekali. Jika tzdata tidak tersedia di server, dipakai WIB (UTC+7, tanpa DST)
+// supaya time.In tidak pernah menerima nil dan panic.
+var jakarta = func() *time.Location {
+	if loc, err := time.LoadLocation("Asia/Jakarta"); err == nil {
+		return loc
+	}
+	return time.FixedZone("WIB", 7*60*60)
+}()
+
+// HolidayAPIURL adalah endpoint daftar libur nasional per bulan (?month=N).
+var HolidayAPIURL = "https://dayoffapi.vercel.app/api"
+
+// HTTPClient dipakai oleh Get dan HariLibur. Timeout mencegah request menggantung.
+var HTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// maxResponseBytes membatasi ukuran body respons yang dibaca Get (10 MiB).
+const maxResponseBytes = 10 << 20
+
+// holidayCacheTTL adalah lama daftar libur per bulan disimpan sebelum diambil ulang.
+const holidayCacheTTL = 12 * time.Hour
+
+type holidayEntry struct {
+	dates   map[string]bool
+	fetched time.Time
+}
+
+var (
+	holidayMu    sync.Mutex
+	holidayCache = map[int]holidayEntry{}
+)
+
 func GetDateSekarang() (datesekarang time.Time) {
-	// Definisi lokasi waktu sekarang
-	location, _ := time.LoadLocation("Asia/Jakarta")
+	t := time.Now().In(jakarta)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, jakarta)
+}
 
-	t := time.Now().In(location) //.Truncate(24 * time.Hour)
-	datesekarang = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-
-	return
+// dayRangeFilter membuat filter _id (ObjectID) untuk rentang [start, start+24 jam).
+func dayRangeFilter(start time.Time) bson.M {
+	return bson.M{
+		"$gte": primitive.NewObjectIDFromTimestamp(start),
+		"$lt":  primitive.NewObjectIDFromTimestamp(start.Add(24 * time.Hour)),
+	}
 }
 
 func TodayFilter() bson.M {
-	return bson.M{
-		"$gte": primitive.NewObjectIDFromTimestamp(GetDateSekarang()),
-		"$lt":  primitive.NewObjectIDFromTimestamp(GetDateSekarang().Add(24 * time.Hour)),
-	}
+	return dayRangeFilter(GetDateSekarang())
 }
 
 func YesterdayNotLiburFilter() bson.M {
-	return bson.M{
-		"$gte": primitive.NewObjectIDFromTimestamp(GetDateKemarinBukanHariLibur()),
-		"$lt":  primitive.NewObjectIDFromTimestamp(GetDateKemarinBukanHariLibur().Add(24 * time.Hour)),
-	}
+	return dayRangeFilter(GetDateKemarinBukanHariLibur())
 }
 
 func YesterdayFilter() bson.M {
-	return bson.M{
-		"$gte": primitive.NewObjectIDFromTimestamp(GetDateKemarin()),
-		"$lt":  primitive.NewObjectIDFromTimestamp(GetDateKemarin().Add(24 * time.Hour)),
-	}
+	return dayRangeFilter(GetDateKemarin())
 }
 
 func GetDateKemarinBukanHariLibur() (datekemarinbukanlibur time.Time) {
-	// Definisi lokasi waktu sekarang
-	location, _ := time.LoadLocation("Asia/Jakarta")
-	n := -1
-	t := time.Now().AddDate(0, 0, n).In(location) //.Truncate(24 * time.Hour)
-	for HariLibur(t) {
-		n -= 1
-		t = time.Now().AddDate(0, 0, n).In(location)
+	t := time.Now().In(jakarta).AddDate(0, 0, -1)
+	// dibatasi 31 hari supaya tidak pernah berputar tanpa henti
+	for i := 0; i < 31 && HariLibur(t); i++ {
+		t = t.AddDate(0, 0, -1)
 	}
-
-	datekemarinbukanlibur = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-
-	return
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, jakarta)
 }
 
 func GetDateKemarin() (datekemarin time.Time) {
-	// Definisi lokasi waktu sekarang
-	location, _ := time.LoadLocation("Asia/Jakarta")
-	n := -1
-	t := time.Now().AddDate(0, 0, n).In(location) //.Truncate(24 * time.Hour)
-	datekemarin = time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-
-	return
+	t := time.Now().In(jakarta).AddDate(0, 0, -1)
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, jakarta)
 }
 
+// HariLibur mengembalikan true untuk Sabtu, Minggu, atau tanggal libur nasional.
+// Sabtu/Minggu tidak memanggil API. Daftar libur per bulan di-cache selama holidayCacheTTL.
+// Jika API gagal, tanggal dianggap bukan libur (perilaku sama seperti sebelumnya).
 func HariLibur(thedate time.Time) (libur bool) {
-	wekkday := thedate.Weekday()
-	inhari := int(wekkday)
-	if inhari == 0 || inhari == 6 {
-		libur = true
+	if wd := thedate.Weekday(); wd == time.Saturday || wd == time.Sunday {
+		return true
 	}
-	tglskr := thedate.Format("2006-01-02")
-	tgl := int(thedate.Month())
-	urltarget := "https://dayoffapi.vercel.app/api?month=" + strconv.Itoa(tgl)
-	_, hasil, _ := Get[[]NewLiburNasional](urltarget)
-	for _, v := range hasil {
-		if v.Tanggal == tglskr {
-			libur = true
-		}
-	}
-	return
+	return holidaysForMonth(int(thedate.Month()))[thedate.Format("2006-01-02")]
 }
 
+func holidaysForMonth(month int) map[string]bool {
+	holidayMu.Lock()
+	defer holidayMu.Unlock()
+	if e, ok := holidayCache[month]; ok && time.Since(e.fetched) < holidayCacheTTL {
+		return e.dates
+	}
+	dates := map[string]bool{}
+	_, hasil, err := Get[[]NewLiburNasional](HolidayAPIURL + "?month=" + strconv.Itoa(month))
+	if err != nil {
+		return dates // jangan cache kegagalan, coba lagi di panggilan berikutnya
+	}
+	for _, v := range hasil {
+		dates[v.Tanggal] = true
+	}
+	holidayCache[month] = holidayEntry{dates: dates, fetched: time.Now()}
+	return dates
+}
+
+// Get mengambil URL dan mendekode JSON ke T, dengan timeout dan batas ukuran body.
 func Get[T any](urltarget string) (statusCode int, result T, err error) {
-	resp, err := http.Get(urltarget)
+	resp, err := HTTPClient.Get(urltarget)
 	if err != nil {
 		return
 	}
-	statusCode = resp.StatusCode
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	statusCode = resp.StatusCode
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
+		return
+	}
+	if len(body) > maxResponseBytes {
+		err = fmt.Errorf("response from %s exceeds %d bytes", urltarget, maxResponseBytes)
 		return
 	}
 	if er := json.Unmarshal(body, &result); er != nil {
-		rawstring := string(body)
-		err = errors.New("Not A Valid JSON Response from " + urltarget + " . CONTENT: " + rawstring)
+		err = errors.New("Not A Valid JSON Response from " + urltarget + " . CONTENT: " + snippet(body))
 		return
 	}
 	return
+}
+
+// snippet memotong body untuk pesan error supaya log tidak membengkak.
+func snippet(b []byte) string {
+	const max = 512
+	if len(b) > max {
+		return string(b[:max]) + "...(truncated)"
+	}
+	return string(b)
 }

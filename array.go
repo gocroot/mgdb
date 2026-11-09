@@ -1,9 +1,8 @@
 package mgdb
 
 import (
-	"context"
 	"fmt"
-	"time"
+	"strings"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -16,7 +15,7 @@ func AddDocToArray[T any](db *mongo.Database, collection string, ObjectID primit
 		"$push": bson.M{arrayname: newDoc},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := opCtx()
 	defer cancel()
 
 	result, err = db.Collection(collection).UpdateOne(ctx, filter, update)
@@ -33,7 +32,7 @@ func DeleteDocFromArray[T any](db *mongo.Database, collection string, ObjectID p
 		"$pull": bson.M{arrayname: memberToDelete},
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := opCtx()
 	defer cancel()
 
 	result, err = db.Collection(collection).UpdateOne(ctx, filter, update)
@@ -53,6 +52,18 @@ func EditDocInArray(db *mongo.Database, collection string, ObjectID primitive.Ob
 		"_id": ObjectID,
 	}
 
+	// Nama field tidak boleh berupa operator ($...) supaya tidak bisa disusupi lewat input.
+	for key := range filterCondition {
+		if strings.HasPrefix(key, "$") {
+			return nil, fmt.Errorf("mgdb: nama field tidak valid: %q", key)
+		}
+	}
+	for key := range updatedFields {
+		if strings.HasPrefix(key, "$") {
+			return nil, fmt.Errorf("mgdb: nama field tidak valid: %q", key)
+		}
+	}
+
 	// Menambahkan kondisi filter untuk elemen dalam array
 	for key, value := range filterCondition {
 		filter[fmt.Sprintf("%s.%s", arrayname, key)] = value
@@ -69,7 +80,7 @@ func EditDocInArray(db *mongo.Database, collection string, ObjectID primitive.Ob
 		"$set": updateMap,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := opCtx()
 	defer cancel()
 
 	// Melakukan update pada dokumen yang sesuai dengan filter

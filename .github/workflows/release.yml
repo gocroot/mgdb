@@ -23,8 +23,8 @@ on:
         options: [patch, minor, major]
         default: patch
 
-permissions:
-  contents: write
+# Default tanpa izin apa pun; izin tulis hanya diberikan ke job yang membutuhkannya.
+permissions: {}
 
 concurrency:
   group: release
@@ -33,23 +33,21 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    permissions:
+      contents: write
+    env:
+      GOTOOLCHAIN: local # pakai Go dari setup-go saja, jangan unduh toolchain kedua
     steps:
+      # Action di-pin ke SHA commit supaya tag yang digeser tidak bisa menyisipkan kode.
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-
-      - name: Verify
-        run: |
-          go vet ./...
-          go test -race ./...
-
+      # Versi dihitung lebih dulu supaya setup Go dan test dilewati jika tidak ada yang dirilis.
       - name: Hitung versi berikutnya
         id: version
         env:
@@ -100,12 +98,24 @@ jobs:
           echo "next=$next" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Go
+        if: steps.version.outputs.skip == 'false'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod # memakai baris toolchain jika ada
+
+      - name: Verify
+        if: steps.version.outputs.skip == 'false'
+        run: |
+          go vet ./...
+          go test -race ./...
+
       - name: Buat tag dan GitHub Release
         if: steps.version.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           NEXT: ${{ steps.version.outputs.next }}
-        run: gh release create "$NEXT" --target "$GITHUB_SHA" --title "$NEXT" --generate-notes
+        run: gh release create "$NEXT" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$NEXT" --generate-notes
 
       - name: Daftarkan versi ke Go proxy
         if: steps.version.outputs.skip == 'false'
@@ -113,4 +123,4 @@ jobs:
           NEXT: ${{ steps.version.outputs.next }}
         run: |
           module=$(go list -m)
-          curl -fsS "https://proxy.golang.org/${module}/@v/${NEXT}.info" || echo "Proxy belum siap, versi tetap bisa diambil dengan go get"
+          curl -fsS --max-time 30 "https://proxy.golang.org/${module}/@v/${NEXT}.info" || echo "Proxy belum siap, versi tetap bisa diambil dengan go get"
