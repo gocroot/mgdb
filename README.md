@@ -1,5 +1,7 @@
 # MongoDB Helper for Golang
 
+Part of the [GoCroot](https://gocroot.if.co.id/) ecosystem. Used by [GoCroot Core](https://github.com/gocroot/core).
+
 ## Overview
 This package (`mgdb`) provides a set of helper functions to simplify interaction with MongoDB from a Golang application. It includes connection handling, querying, inserting, updating, deleting documents, and working with distinct and random documents.
 
