@@ -1,0 +1,116 @@
+name: Auto Tag & Release
+
+# Membuat tag semver dan GitHub Release otomatis setiap ada perubahan kode Go di main.
+# Kenaikan versi ditentukan dari pesan commit sejak tag terakhir:
+#   feat: ...             -> minor  (v0.1.9 -> v0.2.0)
+#   fix:/chore:/lainnya   -> patch  (v0.1.9 -> v0.1.10)
+#   feat!: / BREAKING     -> minor selama v0.x, gagal di v1+ (Go butuh path /vN untuk major baru)
+# Tambahkan [skip release] di pesan commit untuk melewati rilis.
+# Bisa juga dijalankan manual dari tab Actions dengan pilihan patch/minor/major.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.go'
+      - 'go.mod'
+      - 'go.sum'
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Jenis kenaikan versi
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Verify
+        run: |
+          go vet ./...
+          go test -race ./...
+
+      - name: Hitung versi berikutnya
+        id: version
+        env:
+          BUMP_INPUT: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          latest=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+
+          if [ -n "$latest" ] && [ "$(git rev-list -n1 "$latest")" = "$(git rev-parse HEAD)" ]; then
+            echo "HEAD sudah memiliki tag $latest, rilis dilewati"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$latest" ]; then
+            next=v0.1.0
+          else
+            IFS=. read -r major minor patch <<< "${latest#v}"
+            patch=${patch%%-*}
+
+            bump=${BUMP_INPUT:-}
+            if [ -z "$bump" ]; then
+              msgs=$(git log --format=%B "$latest..HEAD")
+              if grep -qE '^[a-z]+(\([^)]*\))?!:|BREAKING CHANGE' <<< "$msgs"; then
+                bump=major
+              elif grep -qE '^feat(\([^)]*\))?:' <<< "$msgs"; then
+                bump=minor
+              else
+                bump=patch
+              fi
+            fi
+
+            if [ "$bump" = major ] && [ "$major" -eq 0 ]; then
+              bump=minor   # selama v0.x, perubahan breaking cukup naik minor
+            fi
+            if [ "$bump" = major ]; then
+              echo "::error::Major version v$((major + 1)) di Go butuh path modul /v$((major + 1)). Lakukan manual."
+              exit 1
+            fi
+
+            case "$bump" in
+              minor) next="v${major}.$((minor + 1)).0" ;;
+              *)     next="v${major}.${minor}.$((patch + 1))" ;;
+            esac
+          fi
+
+          echo "Versi berikutnya: $next (sebelumnya: ${latest:-tidak ada})"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
+      - name: Buat tag dan GitHub Release
+        if: steps.version.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT: ${{ steps.version.outputs.next }}
+        run: gh release create "$NEXT" --target "$GITHUB_SHA" --title "$NEXT" --generate-notes
+
+      - name: Daftarkan versi ke Go proxy
+        if: steps.version.outputs.skip == 'false'
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          module=$(go list -m)
+          curl -fsS "https://proxy.golang.org/${module}/@v/${NEXT}.info" || echo "Proxy belum siap, versi tetap bisa diambil dengan go get"
