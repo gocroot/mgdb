@@ -1,6 +1,6 @@
 module github.com/gocroot/mgdb
 
-go 1.23.4
+go 1.27.0
 
 require go.mongodb.org/mongo-driver v1.17.4
 
